@@ -1,4 +1,4 @@
-import {Address, Signature, Slot, TransactionSigner} from "@solana/kit";
+import type {Address, Signature, Slot, TransactionSigner} from "@solana/kit";
 
 /**
  * Four Solana Cluster
