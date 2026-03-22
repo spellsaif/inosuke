@@ -14,7 +14,7 @@ import type {
   SendResult,
 } from "./types.js"
 
-// ─── URL resolution ───────────────────────────────────────────────────────────
+// URL resolution
 
 const VALID_MONIKERS = new Set<ClusterMoniker>([
   "mainnet",
@@ -69,17 +69,17 @@ function resolveUrls(input: ClusterInput): {
   }
 }
 
-// ─── LamportClient ────────────────────────────────────────────────────────────
+// ─── AuraClient ────────────────────────────────────────────────────────────
 
 /**
- * The main lamport client. All operations start here.
- * Create one with connect() — not with new LamportClient().
+ * The main aura client. All operations start here.
+ * Create one with connect() — not with new AuraClient().
  *
  * Why a class? Because the client holds shared state —
  * the rpc connection, the cluster URL — that all operations need.
  * A class bundles that state with the methods that use it.
  */
-export class LamportClient {
+export class AuraClient {
   // Public so advanced users can drop down to raw kit if needed
   readonly rpc: ReturnType<typeof createSolanaRpc>
   readonly rpcSubscriptions: ReturnType<typeof createSolanaRpcSubscriptions>
@@ -140,7 +140,7 @@ export class LamportClient {
     return builder.send(options)
   }
 
-  // ─── RPC helpers ────────────────────────────────────────────────────────────
+  // RPC helpers
 
   /**
    * Fetch the latest blockhash from the cluster.
@@ -226,7 +226,7 @@ export class LamportClient {
 // ─── connect ──────────────────────────────────────────────────────────────────
 
 /**
- * Connect to a Solana cluster and return a LamportClient.
+ * Connect to a Solana cluster and return a AuraClient.
  * This is the entry point for everything in lamport.
  *
  * @example
@@ -235,7 +235,7 @@ export class LamportClient {
  * const client = connect("localnet")
  * const client = connect("https://my-rpc.helius.xyz/api-key")
  */
-export function connect(cluster: ClusterInput): LamportClient {
+export function connect(cluster: ClusterInput): AuraClient {
   if (!cluster) throw new InvalidClusterError(String(cluster))
 
   const { httpUrl, wsEndpoint } = resolveUrls(cluster)
@@ -246,5 +246,5 @@ export function connect(cluster: ClusterInput): LamportClient {
   // createSolanaRpcSubscriptions — WebSocket for confirmations
   const rpcSubscriptions = createSolanaRpcSubscriptions(wsEndpoint)
 
-  return new LamportClient(rpc, rpcSubscriptions, cluster)
+  return new AuraClient(rpc, rpcSubscriptions, cluster)
 }
