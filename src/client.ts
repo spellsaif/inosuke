@@ -1,8 +1,10 @@
 import {
+  airdropFactory,
   createSolanaRpc,
   createSolanaRpcSubscriptions,
+  lamports,
 } from "@solana/kit"
-import type { IInstruction, TransactionSigner, Address, Signature } from "@solana/kit"
+import type { Instruction, TransactionSigner, Address, Signature, RpcDevnet, SolanaRpcApiDevnet, RpcSubscriptionsDevnet, SolanaRpcSubscriptionsApi } from "@solana/kit"
 import { InvalidClusterError } from "./errors.js"
 import { TxBuilder } from "./transaction.js"
 import { rpcUrl, wsUrl } from "./utils.js"
@@ -17,10 +19,7 @@ import type {
 // URL resolution
 
 const VALID_MONIKERS = new Set<ClusterMoniker>([
-  "mainnet",
-  "devnet",
-  "testnet",
-  "localnet",
+  "mainnet", "devnet", "testnet", "localnet",
 ])
 
 function isClusterMoniker(value: string): value is ClusterMoniker {
@@ -69,7 +68,7 @@ function resolveUrls(input: ClusterInput): {
   }
 }
 
-// ─── AuraClient ────────────────────────────────────────────────────────────
+// AuraClient
 
 /**
  * The main aura client. All operations start here.
@@ -95,7 +94,7 @@ export class AuraClient {
     this.cluster = cluster
   }
 
-  // ─── Transaction ────────────────────────────────────────────────────────────
+  // Transaction
 
   /**
    * Start building a transaction.
@@ -110,17 +109,15 @@ export class AuraClient {
    */
   buildTx(options: {
     feePayer: TransactionSigner
-    instructions: IInstruction[]
+    instructions: Instruction[]            // ← was IInstruction
     computeUnitLimit?: number
     computeUnitPrice?: bigint
     latestBlockhash?: LatestBlockhash
   }): TxBuilder {
-    // Inject the RPC connections into the builder state
-    // The builder needs them to simulate and send
     return new TxBuilder({
       feePayer: options.feePayer,
       instructions: options.instructions,
-      computeUnitLimit: options.computeUnitLimit,
+      computeUnitLimit: options.computeUnitLimit,   // may be undefined — that's fine now
       computeUnitPrice: options.computeUnitPrice,
       latestBlockhash: options.latestBlockhash,
       rpc: this.rpc,
@@ -197,33 +194,25 @@ export class AuraClient {
    * @example
    * await client.airdrop(signer.address, 1_000_000_000n) // 1 SOL
    */
-  async airdrop(address: Address, lamports: bigint): Promise<Signature> {
-    const signature = await this.rpc
-      .requestAirdrop(address, lamports)
-      .send()
+  async airdrop(address: Address, lamports_amount: bigint): Promise<void> {
+  // airdropFactory is the new API in kit 6.x
+  // It handles sending the airdrop AND waiting for confirmation
+  // No need to poll manually anymore
+  const airdrop = airdropFactory({
+  rpc: this.rpc as RpcDevnet<SolanaRpcApiDevnet>,
+  rpcSubscriptions: this.rpcSubscriptions as RpcSubscriptionsDevnet<SolanaRpcSubscriptionsApi>,
+})
 
-    // Wait for the airdrop to confirm before returning
-    // Otherwise code that follows immediately might not see the new balance
-    const { value: latestBlockhash } = await this.rpc
-      .getLatestBlockhash()
-      .send()
-
-    await this.rpc
-      .confirmTransaction(
-        {
-          signature,
-          blockhash: latestBlockhash.blockhash,
-          lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
-        } as Parameters<typeof this.rpc.confirmTransaction>[0],
-        { commitment: "confirmed" },
-      )
-      .send()
-
-    return signature as Signature
-  }
+  await airdrop({
+    recipientAddress: address,
+    lamports: lamports(lamports_amount),
+    commitment: "confirmed",
+  })
 }
 
-// ─── connect ──────────────────────────────────────────────────────────────────
+}
+
+// connect
 
 /**
  * Connect to a Solana cluster and return a AuraClient.
