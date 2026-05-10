@@ -43,14 +43,19 @@ export {
   TOKEN_ACCOUNT_SIZE,
 } from "./token.js"
 
+// System
+export { transferSol } from "./system.js"
+export type { TransferSolOptions } from "./system.js"
+
 // Utils
 export {
   toSol,
-  toLamports,
+  toLamport,
   explorerUrl,
   rpcUrl,
   wsUrl,
   truncate,
+  findPda,
   // parseSimulationLogs and sleep are internal — not exported
 } from "./utils.js"
 

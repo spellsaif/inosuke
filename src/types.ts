@@ -10,7 +10,7 @@ export type ClusterMoniker = "mainnet" | "devnet" | "testnet" | "localnet";
  * a known moniker or full URL
  */
 
-export type ClusterInput = ClusterMoniker | string;
+export type ClusterInput = ClusterMoniker | (string & {});
 
 /**
  * processed - included in a block. Fast, can roll back.
