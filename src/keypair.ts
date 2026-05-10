@@ -128,5 +128,11 @@ export async function keyFromBytes(bytes: Uint8Array): Promise<KeyPairSigner> {
 export async function toBase58(signer: KeyPairSigner): Promise<string> {
   const pkcs8 = await crypto.subtle.exportKey("pkcs8", signer.keyPair.privateKey)
   const privateKeyBytes = new Uint8Array(pkcs8, pkcs8.byteLength - 32, 32)
-  return getBase58Decoder().decode(privateKeyBytes)
+  const publicKeyBytes = await crypto.subtle.exportKey("raw", signer.keyPair.publicKey)
+
+  const combined = new Uint8Array(64)
+  combined.set(privateKeyBytes, 0)
+  combined.set(new Uint8Array(publicKeyBytes), 32)
+
+  return getBase58Decoder().decode(combined)
 }
