@@ -1,9 +1,9 @@
 # Inosuke
-![Inosuke Logo](https://i.ibb.co/yFbWRMsn/inosuke.png)
+![Inosuke Logo](./inosuke.png)
 
 Inosuke is a modern, lightweight, and professional-grade Solana TypeScript library designed to wrap the `@solana/kit` architecture with an ergonomic, fluent, and intuitive API. 
 
-It aims to bridge the gap between low-level instruction building and high-level developer experience, bringing the power of Web3.js v2 into a framework that "just works."
+It bridges the gap between low-level instruction building and high-level developer experience, bringing the full power of Web3.js v2 into a framework that "just works" across all JavaScript environments (Browser, Node.js, Deno, and Bun).
 
 ---
 
@@ -14,15 +14,17 @@ Solana's transition to `@solana/web3.js` v2 (`@solana/kit`) introduced a powerfu
 Inosuke makes **opinionated design choices** to maximize Developer Experience (DX) without sacrificing performance:
 
 1. **Fluent `TxBuilder` Pattern:** 
-   Transactions in Inosuke are built using an immutable builder pattern (`client.buildTx()`). Modifiers like `.withPriorityFee()` or `.withJitoTip()` return new instances, preventing state-mutation bugs and making code highly readable.
-2. **Auto-Simulation & Compute Optimization:** 
-   By default, Inosuke simulates every transaction locally before sending. It parses the simulation logs to extract the exact compute units consumed, applies a 10% safety buffer, and uses that for the final `ComputeBudget` instruction. This prevents frustrating `ComputeBudgetExceeded` errors.
-3. **No ATA Boilerplate:** 
-   Associated Token Accounts (ATAs) are notoriously tedious. Inosuke's token handlers (`transferToken`, `mintMore`) automatically resolve ATAs, and if a recipient doesn't have one, Inosuke injects the creation instruction inline.
-4. **V0 and ALT Native:**
-   Inosuke compiles transactions as Versioned Transactions (`v0`) by default, meaning Address Lookup Tables (ALTs) are supported out of the box via `.withAddressLookupTable()`. 
-5. **Jito MEV Integration:**
-   Inosuke bypasses the public mempool natively. Simply appending `.withJitoTip()` routes your transaction through the Jito Block Engine, preventing sandwich attacks and bypassing heavy network congestion.
+   Transactions in Inosuke are built using an immutable builder pattern (`client.buildTx()`). Modifiers like `.withPriorityFee()` or `.withDynamicPriorityFee()` return new instances, preventing state-mutation bugs.
+2. **Adaptive Congestion-Aware Priority Fees:** 
+   Rather than using flat fee rates, `.withDynamicPriorityFee(level)` queries the **localized fee market** specifically for the read/written accounts in your transaction, sorting and mapping dynamic percentile priorities (`low`, `medium`, `high`, `veryHigh`) with automated safety floors.
+3. **Auto-Simulation & Compute Optimization:** 
+   By default, Inosuke simulates every transaction locally before sending. It parses the simulation logs to extract the exact compute units consumed, applies a 10% safety buffer, and uses that for the final `ComputeBudget` instruction.
+4. **Token-2022 and Legacy Token Native Support:** 
+   Associated Token Accounts (ATAs) are notoriously tedious. Inosuke's token handlers (`transferToken`, `mintMore`, `getAta`) automatically resolve ATAs, and support passing a custom `tokenProgram` (supporting both legacy `TOKEN_PROGRAM_ADDRESS` and modern `TOKEN_2022_PROGRAM_ADDRESS` seamlessly).
+5. **Dynamic Runtime Anchor Client:**
+   Skip complex static code generation scripts! By passing a JSON IDL, `client.loadProgram(programId, idl)` generates an on-the-fly typed Proxy client supporting primitive, structured, and nested Borsh deserialization alongside active 8-byte account discriminator checks.
+6. **V0, ALT, and Jito Native:**
+   Compiles transactions as Versioned Transactions (`v0`) by default. Address Lookup Tables (ALTs) are supported via `.withAddressLookupTable()`. Appending `.withJitoTip()` routes your transaction through Jito Block Engines for MEV-proof execution.
 
 ---
 
@@ -31,7 +33,7 @@ Inosuke makes **opinionated design choices** to maximize Developer Experience (D
 ```mermaid
 graph TD
     A[InosukeClient] -->|buildTx| B(TxBuilder State)
-    B -->|withPriorityFee| C(Modified TxBuilder)
+    B -->|withDynamicPriorityFee| C(Modified TxBuilder)
     C -->|withJitoTip| D(Modified TxBuilder)
     D -->|send| E{Simulate Tx}
     E -->|Parses exact compute| F[Compile V0 Transaction]
@@ -67,7 +69,7 @@ const customClient = connect("https://my-rpc.helius.xyz/api-key");
 
 ## 2. Managing Keypairs
 
-Inosuke makes it easy to generate, load, save, and export Solana keypairs securely.
+Inosuke makes it easy to generate, load, save, and export Solana keypairs securely. Calling keypair utilities from the browser safely skips file system routines to prevent bundle crashes.
 
 ```typescript
 import { 
@@ -81,7 +83,7 @@ import {
 // Generate a highly secure, non-extractable key for signing
 const signer = await generateKey();
 
-// Load an existing file (e.g., from Solana CLI)
+// Load an existing file (e.g., from Solana CLI) - Safe for server-side runtimes
 const cliSigner = await loadKeyFile("~/.config/solana/id.json");
 
 // Generate a key that you plan to save/export later
@@ -128,11 +130,10 @@ const { instructions } = await transferSol({
   amount: toLamport(1.5),
 });
 
-// Build the transaction
+// Build the transaction with localized priority fees
 const result = await client
   .buildTx({ feePayer: signer, instructions })
-  .withPriorityFee(1000n)          // Pay a priority fee (microLamports)
-  .withComputeLimit(150_000)       // Override auto-simulation limit if needed
+  .withDynamicPriorityFee("high")  // Auto-queries localized account fee market (25th, 50th, 75th, or 95th percentiles)
   .send();                         // Submits and confirms!
 
 console.log("Transaction Confirmed! Signature:", result.signature);
@@ -143,6 +144,8 @@ console.log("Transaction Confirmed! Signature:", result.signature);
 Inosuke natively supports **Versioned Transactions (v0)** and offers advanced routing.
 
 ```typescript
+import { address } from 'inosuke';
+
 // Compress your payload using Address Lookup Tables
 const jupiterAlt = address("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4");
 
@@ -154,42 +157,45 @@ await client.buildTx({ feePayer: signer, instructions: hugeDeFiSwap })
 
 ---
 
-## 5. SPL Tokens (Minting, Transferring, Burning, Queries)
+## 5. SPL Tokens & Token-2022 (Minting, Transferring, Queries)
 
-Inosuke provides robust helpers for SPL tokens, completely abstracting away the hassle of Associated Token Accounts (ATAs).
+Inosuke provides robust, dynamic wrappers for SPL tokens, completely abstracting away the legacy and modern Associated Token Account (ATA) derivation schemas.
 
-### Querying Token Data
+### Querying Token Data (Token-2022 Compatible)
 ```typescript
+import { TOKEN_2022_PROGRAM_ADDRESS } from 'inosuke';
+
 // Get supply and decimals
 const mintInfo = await client.getMintInfo(mintAddress);
 
-// Get balances
-const balance = await client.getTokenBalanceByOwner(mintAddress, userAddress);
+// Get balances under specific token programs
+const balance = await client.getTokenBalanceByOwner(mintAddress, userAddress, TOKEN_2022_PROGRAM_ADDRESS);
 
 // Fetch Metaplex Token Metadata (Name, Symbol, Logo)
 const metadata = await client.getTokenMetadata(mintAddress);
-console.log(metadata.name, metadata.symbol, metadata.uri);
 ```
 
-### Minting a new Token
+### Creating & Minting Tokens (Token-2022)
 ```typescript
-import { mintToken, mintMore } from 'inosuke';
+import { mintToken, mintMore, TOKEN_2022_PROGRAM_ADDRESS } from 'inosuke';
 
-// Step 1: Create the mint
+// Step 1: Create the Mint under Token-2022 program ID
 const { instructions: createMintIxs, mint } = await mintToken({
   decimals: 9,
   authority: signer,
+  tokenProgram: TOKEN_2022_PROGRAM_ADDRESS,
   rentFor: (size) => client.rentFor(size),
 });
 
 await client.buildTx({ feePayer: signer, instructions: createMintIxs }).send();
 
-// Step 2: Mint tokens to a wallet (Inosuke handles the ATA automatically!)
+// Step 2: Mint supply (Inosuke automatically derives the Token-2022 ATA)
 const { instructions: mintIxs } = await mintMore({
   mint: mint.address,
   authority: signer,
   recipient: signer.address,
-  amount: 1_000_000_000n, // 1 Token
+  amount: 1_000_000_000n,
+  tokenProgram: TOKEN_2022_PROGRAM_ADDRESS,
 });
 
 await client.buildTx({ feePayer: signer, instructions: mintIxs }).send();
@@ -197,32 +203,64 @@ await client.buildTx({ feePayer: signer, instructions: mintIxs }).send();
 
 ### Transferring Tokens
 ```typescript
-import { transferToken } from 'inosuke';
+import { transferToken, TOKEN_2022_PROGRAM_ADDRESS } from 'inosuke';
 
-// Transfer tokens to another wallet. 
-// If they don't have an ATA, Inosuke creates one inline!
+// Transfer tokens to another wallet. Creates recipient ATA inline if missing!
 const { instructions } = await transferToken({
-  mint: mint.address,
-  from: signer,           // Sender (TransactionSigner)
-  to: recipientAddress,   // Recipient (Address)
-  amount: 500_000_000n,   // 0.5 Tokens
+  mint: mintAddress,
+  from: signer,           
+  to: recipientAddress,   
+  amount: 500_000_000n,   
   decimals: 9,
-  payer: signer,          // Who pays for the ATA creation
+  payer: signer,          
+  tokenProgram: TOKEN_2022_PROGRAM_ADDRESS,
 });
 
 await client.buildTx({ feePayer: signer, instructions }).send();
 ```
 
-### Burning Tokens
+---
+
+## 6. Dynamic Anchor Program Client
+
+Load Anchor programs and parse/decode raw on-chain account states with zero off-chain static code generation steps.
+
 ```typescript
-import { burnToken } from 'inosuke';
+import { connect, loadKeyFile, address } from "inosuke";
+import customProgramIdl from "./my_custom_program.json";
 
-const { instructions } = await burnToken({
-  mint: mint.address,
-  owner: signer,
-  amount: 100_000_000n, // 0.1 Tokens
-  decimals: 9,
-});
+async function main() {
+  const client = connect("devnet");
+  const walletSigner = await loadKeyFile("~/.config/solana/id.json");
 
-await client.buildTx({ feePayer: signer, instructions }).send();
+  // Load the Program dynamically
+  const programId = address("MyProgramID11111111111111111111111111111111");
+  const program = client.loadProgram(programId, customProgramIdl);
+
+  // Build a Program Instruction dynamically
+  const instruction = await program.instruction.initializeUser({
+    args: {
+      username: "inosuke_warrior",
+      age: 18,
+    },
+    accounts: {
+      userProfile: address("UserProfileAccountAddressHere"),
+      authority: walletSigner.address,
+      systemProgram: address("11111111111111111111111111111111"),
+    },
+  });
+
+  // Submit the transaction
+  await client
+    .buildTx({ feePayer: walletSigner, instructions: [instruction] })
+    .withDynamicPriorityFee("high")
+    .send();
+
+  // Fetch & Decode Account State (Actively validates 8-byte discriminator)
+  const profileAddress = address("UserProfileAccountAddressHere");
+  const profileState = await program.account.userProfile.fetch(profileAddress);
+
+  console.log("Decoded Username:", profileState.username); // "inosuke_warrior"
+  console.log("Decoded Age:", profileState.age);           // 18
+}
 ```
