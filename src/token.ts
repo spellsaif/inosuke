@@ -10,7 +10,7 @@ import {
   getBurnCheckedInstruction,
   getMintSize,
   findAssociatedTokenPda,
-  getCreateAssociatedTokenInstructionAsync
+  getCreateAssociatedTokenIdempotentInstructionAsync
 } from "@solana-program/token"
 import { getCreateAccountInstruction } from "@solana-program/system"
 import type {
@@ -38,6 +38,7 @@ export const MINT_SIZE = getMintSize();
  * Used to calculate rent for new token accounts.
  */
 export const TOKEN_ACCOUNT_SIZE = 165
+export const TOKEN_2022_PROGRAM_ADDRESS = "TokenzQdBNbLqP5xxRZr67BG6RcrJtJC451X449n5cM" as Address
 
 // mintToken
 
@@ -73,9 +74,10 @@ export async function mintToken(
     rentFor: (dataSize: number) => Promise<bigint>
   },
 ): Promise<{ instructions: Instruction[]; mint: TransactionSigner }> {
-  const { decimals, authority, freezeAuthority, rentFor } = options
+  const { decimals, authority, freezeAuthority, rentFor, tokenProgram } = options
   const mint = options.mint ?? (await generateKeyPairSigner())
   const lamports = await rentFor(MINT_SIZE)
+  const programAddress = tokenProgram ?? TOKEN_PROGRAM_ADDRESS
 
   const instructions: Instruction[] = [
     getCreateAccountInstruction({
@@ -83,14 +85,14 @@ export async function mintToken(
       newAccount: mint,
       lamports,
       space: MINT_SIZE,
-      programAddress: TOKEN_PROGRAM_ADDRESS,
+      programAddress,
     }),
     getInitializeMintInstruction({
       mint: mint.address,
       decimals,
       mintAuthority: authority.address,
       freezeAuthority: freezeAuthority ?? null,
-    }),
+    }, { programAddress }),
   ]
 
   return { instructions, mint }
@@ -120,23 +122,26 @@ export async function mintMore(options: {
   authority: TransactionSigner
   recipient: Address
   amount: bigint
+  tokenProgram?: Address
 }): Promise<{ instructions: Instruction[] }> {
-  const { mint, authority, recipient, amount } = options
+  const { mint, authority, recipient, amount, tokenProgram } = options
+  const programAddress = tokenProgram ?? TOKEN_PROGRAM_ADDRESS
 
   const instructions: Instruction[] = [
-    await getCreateAssociatedTokenInstructionAsync({
+    await getCreateAssociatedTokenIdempotentInstructionAsync({
       payer: authority,
       owner: recipient,
       mint,
+      tokenProgram: programAddress,
     }),
     getMintToInstruction({
       mint,
       token: (await findAssociatedTokenPda({  mint,
   owner: recipient,
-  tokenProgram: TOKEN_PROGRAM_ADDRESS }))[0],
+  tokenProgram: programAddress }))[0],
       mintAuthority: authority,
       amount,
-    }),
+    }, { programAddress }),
   ]
 
   return { instructions }
@@ -174,13 +179,14 @@ export async function transferToken(
     skipAtaCreation?: boolean
   },
 ): Promise<{ instructions: Instruction[] }> {
-  const { mint, from, to, amount, decimals, payer, skipAtaCreation } = options
+  const { mint, from, to, amount, decimals, payer, skipAtaCreation, tokenProgram } = options
+  const programAddress = tokenProgram ?? TOKEN_PROGRAM_ADDRESS
 
   const [sourceAta]      = await findAssociatedTokenPda({
-    mint, owner: from.address, tokenProgram: TOKEN_PROGRAM_ADDRESS,
+    mint, owner: from.address, tokenProgram: programAddress,
   })
   const [destinationAta] = await findAssociatedTokenPda({
-    mint, owner: to, tokenProgram: TOKEN_PROGRAM_ADDRESS,
+    mint, owner: to, tokenProgram: programAddress,
   })
 
   const instructions: Instruction[] = []
@@ -188,10 +194,11 @@ export async function transferToken(
   // Only add ATA creation if not explicitly skipped
   if (!skipAtaCreation) {
     instructions.push(
-      await getCreateAssociatedTokenInstructionAsync({
+      await getCreateAssociatedTokenIdempotentInstructionAsync({
         payer,
         owner: to,
         mint,
+        tokenProgram: programAddress,
       }),
     )
   }
@@ -204,7 +211,7 @@ export async function transferToken(
       authority: from,
       amount,
       decimals,
-    }),
+    }, { programAddress }),
   )
 
   return { instructions }
@@ -230,9 +237,10 @@ export async function transferToken(
 export async function burnToken(
   options: BurnTokenOptions,
 ): Promise<{ instructions: Instruction[] }> {
-  const { mint, owner, amount, decimals } = options
+  const { mint, owner, amount, decimals, tokenProgram } = options
+  const programAddress = tokenProgram ?? TOKEN_PROGRAM_ADDRESS
 
-  const [tokenAccount] = await findAssociatedTokenPda({ mint, owner: owner.address, tokenProgram: TOKEN_PROGRAM_ADDRESS })
+  const [tokenAccount] = await findAssociatedTokenPda({ mint, owner: owner.address, tokenProgram: programAddress })
 
   const instructions: Instruction[] = [
     getBurnCheckedInstruction({
@@ -241,15 +249,15 @@ export async function burnToken(
       authority: owner,
       amount,
       decimals,
-    }),
+    }, { programAddress }),
   ]
 
   return { instructions }
 }
 
 
-export async function getAta(mint: Address, owner: Address): Promise<Address> {
-  const [address] = await findAssociatedTokenPda({ mint, owner, tokenProgram: TOKEN_PROGRAM_ADDRESS })
+export async function getAta(mint: Address, owner: Address, tokenProgram?: Address): Promise<Address> {
+  const [address] = await findAssociatedTokenPda({ mint, owner, tokenProgram: tokenProgram ?? TOKEN_PROGRAM_ADDRESS })
   return address
 }
 

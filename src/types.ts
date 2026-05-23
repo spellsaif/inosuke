@@ -45,7 +45,8 @@ export interface MintTokenOptions {
     decimals: number,
     authority: TransactionSigner,
     freezeAuthority?: Address,
-    mint?: TransactionSigner
+    mint?: TransactionSigner,
+    tokenProgram?: Address
 }
 
 export interface TransferTokenOptions {
@@ -53,12 +54,14 @@ export interface TransferTokenOptions {
     from: TransactionSigner,
     to: Address,
     amount: bigint,
-    decimals: number
+    decimals: number,
+    tokenProgram?: Address
 }
 
 export interface BurnTokenOptions {
     mint: Address,
     owner: TransactionSigner,
     amount: bigint,
-    decimals: number
+    decimals: number,
+    tokenProgram?: Address
 }
