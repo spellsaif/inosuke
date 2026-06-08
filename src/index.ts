@@ -2,29 +2,30 @@
  * Inosuke — Solana TypeScript library
  *
  * @example
- * import { connect, loadKeyFile, toSol, explorerUrl } from 'inosuke'
+ * import { connect, Keypair, LAMPORTS_PER_SOL } from 'inosuke'
  *
  * const client = connect("devnet")
- * const signer = await loadKeyFile("~/.config/solana/id.json")
+ * const kp = await Keypair.generate()
  *
- * const result = await client
- *   .buildTx({ feePayer: signer, instructions: [...] })
- *   .withPriorityFee(1000n)
- *   .send()
- *
- * console.log(explorerUrl(result.signature, "devnet"))
+ * await client
+ *   .send([myIx])
+ *   .signedBy(kp.signer)
+ *   .withFee('high')
  */
 
-
-export { connect, InosukeClient } from "./client.js"
+export { connect, InosukeClient, TokenClient } from "./client.js"
 export { address } from "@solana/kit"
 export type { Address, KeyPairSigner, Signature, Instruction } from "@solana/kit"
 
-
-export { TxBuilder } from "./transaction.js"
+export { TxBuilder, buildTransaction, prepareTransaction } from "./transaction.js"
+export type { TxHook, BuildTransactionOptions, PrepareOptions } from "./transaction.js"
 export { IdlProgram, getEncoderForIdlType, getDecoderForIdlType, getInstructionDiscriminator, getAccountDiscriminator } from "./idl.js"
 export type { IdlInstructionOptions } from "./idl.js"
 
+export { PublicKey, validateAddress } from "./publickey.js"
+export { Keypair } from "./keypair.js"
+export { asAddress, asSigner } from "./guards.js"
+export { debug, isDebugEnabled } from "./debug.js"
 export {
   generateKey,
   generateExtractableKey,
@@ -35,7 +36,6 @@ export {
   toBase58,
 } from "./keypair.js"
 
-// Token 
 export {
   mintToken,
   mintMore,
@@ -49,23 +49,24 @@ export {
   TOKEN_2022_PROGRAM_ADDRESS,
 } from "./token.js"
 
-// System
 export { transferSol } from "./system.js"
 export type { TransferSolOptions } from "./system.js"
 
-// Utils
 export {
   toSol,
-  toLamport,
+  toLamports,
+  toSolDisplay,
   explorerUrl,
   rpcUrl,
   wsUrl,
   truncate,
   findPda,
-  // parseSimulationLogs and sleep are internal — not exported
+  LAMPORTS_PER_SOL,
+  getClusterFromGenesis,
 } from "./utils.js"
 
-// Errors
+export { Programs } from "./constants.js"
+
 export {
   InosukeError,
   SimulationError,
@@ -80,7 +81,6 @@ export {
   hasErrorCode,
 } from "./errors.js"
 
-//  Types
 export type {
   ClusterInput,
   ClusterMoniker,
