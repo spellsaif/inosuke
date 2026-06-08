@@ -120,7 +120,7 @@ describe("Token-2022 Support", () => {
     }
 
     const client = new (await import("../src/client.js")).InosukeClient(mockRpc as any, {} as any, "devnet")
-    const balance = await client.getTokenBalanceByOwner(mint, owner, TOKEN_2022_PROGRAM_ADDRESS)
+    const balance = await client.tokenBalanceByOwner(mint, owner, TOKEN_2022_PROGRAM_ADDRESS)
     expect(balance).toBe(1_500_000_000n)
   })
 })

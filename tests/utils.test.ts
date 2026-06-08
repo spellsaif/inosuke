@@ -1,5 +1,5 @@
 import {describe, it, expect} from "vitest";
-import {toSol, toLamport, rpcUrl, wsUrl, explorerUrl, parseSimulationLogs, truncate, findPda} from "./../src/utils.js";
+import {toSol, toLamports, rpcUrl, wsUrl, explorerUrl, parseSimulationLogs, truncate, findPda} from "./../src/utils.js";
 import { address } from "@solana/kit";
 
 describe("toSol", () => {
@@ -17,22 +17,22 @@ describe("toSol", () => {
   })
 })
 
-describe("toLamport", () => {
+describe("toLamports", () => {
   it("converts 1 SOL", () => {
-    expect(toLamport(1)).toBe(1_000_000_000n)
+    expect(toLamports(1)).toBe(1_000_000_000n)
   })
 
   it("converts fractional SOL", () => {
-    expect(toLamport(0.5)).toBe(500_000_000n)
+    expect(toLamports(0.5)).toBe(500_000_000n)
   })
 
   it("handles 0.1 + 0.2 floating point edge case", () => {
     // Without Math.round this gives the wrong answer
-    expect(toLamport(0.1 + 0.2)).toBe(300_000_000n)
+    expect(toLamports(0.1 + 0.2)).toBe(300_000_000n)
   })
 
   it("round trips with toSol", () => {
-    expect(toSol(toLamport(1.5))).toBeCloseTo(1.5)
+    expect(toSol(toLamports(1.5))).toBeCloseTo(1.5)
   })
 })
 

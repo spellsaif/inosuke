@@ -4,12 +4,12 @@ import { TxBuilder } from "../src/transaction.js"
 import { generateKey } from "../src/keypair.js"
 
 describe("Dynamic Priority Fees", () => {
-  it("withDynamicPriorityFee returns a new TxBuilder", async () => {
+  it("withFee returns a new TxBuilder", async () => {
     const client = connect("devnet")
     const signer = await generateKey()
 
     const original = client.buildTx({ feePayer: signer, instructions: [] })
-    const modified = original.withDynamicPriorityFee("high")
+    const modified = original.withFee("high")
 
     expect(modified).not.toBe(original)
     expect(modified).toBeInstanceOf(TxBuilder)
@@ -93,22 +93,22 @@ describe("Dynamic Priority Fees", () => {
     // Test low percentile (25th): mockFees length = 5
     // prices = [100, 500, 2000, 8000, 20000]
     // index = Math.floor(5 * 0.25) = 1 -> prices[1] = 500. Floor makes it 1000n.
-    const txLow = client.buildTx({ feePayer: signer, instructions: [] }).withDynamicPriorityFee("low")
+    const txLow = client.buildTx({ feePayer: signer, instructions: [] }).withFee("low")
     const resultLow = await txLow.send({ skipPreflight: true })
     expect(resultLow.signature).toBeDefined()
 
     // Test medium percentile (50th): index = Math.floor(5 * 0.50) = 2 -> prices[2] = 2000n.
-    const txMed = client.buildTx({ feePayer: signer, instructions: [] }).withDynamicPriorityFee("medium")
+    const txMed = client.buildTx({ feePayer: signer, instructions: [] }).withFee("medium")
     const resultMed = await txMed.send({ skipPreflight: true })
     expect(resultMed.signature).toBeDefined()
 
     // Test high percentile (75th): index = Math.floor(5 * 0.75) = 3 -> prices[3] = 8000n.
-    const txHigh = client.buildTx({ feePayer: signer, instructions: [] }).withDynamicPriorityFee("high")
+    const txHigh = client.buildTx({ feePayer: signer, instructions: [] }).withFee("high")
     const resultHigh = await txHigh.send({ skipPreflight: true })
     expect(resultHigh.signature).toBeDefined()
 
     // Test veryHigh percentile (95th): index = Math.floor(5 * 0.95) = 4 -> prices[4] = 20000n.
-    const txVeryHigh = client.buildTx({ feePayer: signer, instructions: [] }).withDynamicPriorityFee("veryHigh")
+    const txVeryHigh = client.buildTx({ feePayer: signer, instructions: [] }).withFee("veryHigh")
     const resultVeryHigh = await txVeryHigh.send({ skipPreflight: true })
     expect(resultVeryHigh.signature).toBeDefined()
   })
@@ -183,7 +183,7 @@ describe("Dynamic Priority Fees", () => {
     const client = new InosukeClient(mockRpc as any, mockRpcSubscriptions as any, "devnet")
     const signer = await generateKey()
 
-    const tx = client.buildTx({ feePayer: signer, instructions: [] }).withDynamicPriorityFee("high")
+    const tx = client.buildTx({ feePayer: signer, instructions: [] }).withFee("high")
     const result = await tx.send({ skipPreflight: true })
     expect(result.signature).toBeDefined()
   })

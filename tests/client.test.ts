@@ -102,24 +102,24 @@ describe("LamportClient", () => {
 // ─── TxBuilder modifiers ──────────────────────────────────────────────────────
 
 describe("TxBuilder modifiers", () => {
-  it("withComputeLimit returns a new TxBuilder", async () => {
+  it("withCompute returns a new TxBuilder", async () => {
     const client = connect("devnet")
     const signer = await generateKey()
 
     const original = client.buildTx({ feePayer: signer, instructions: [] })
-    const modified = original.withComputeLimit(100_000)
+    const modified = original.withCompute(100_000)
 
     // They should be different objects
     expect(modified).not.toBe(original)
     expect(modified).toBeInstanceOf(TxBuilder)
   })
 
-  it("withPriorityFee returns a new TxBuilder", async () => {
+  it("withFee returns a new TxBuilder", async () => {
     const client = connect("devnet")
     const signer = await generateKey()
 
     const original = client.buildTx({ feePayer: signer, instructions: [] })
-    const modified = original.withPriorityFee(1000n)
+    const modified = original.withFee(1000n)
 
     expect(modified).not.toBe(original)
     expect(modified).toBeInstanceOf(TxBuilder)
@@ -132,8 +132,8 @@ describe("TxBuilder modifiers", () => {
     const builder = client
       .buildTx({ feePayer: signer, instructions: [] })
       .withInstructions([])
-      .withPriorityFee(1000n)
-      .withComputeLimit(50_000)
+      .withFee(1000n)
+      .withCompute(50_000)
 
     expect(builder).toBeInstanceOf(TxBuilder)
   })
@@ -143,8 +143,8 @@ describe("TxBuilder modifiers", () => {
     const signer = await generateKey()
 
     const base = client.buildTx({ feePayer: signer, instructions: [] })
-    const withFee = base.withPriorityFee(1000n)
-    const withLimit = base.withComputeLimit(50_000)
+    const withFee = base.withFee(1000n)
+    const withLimit = base.withCompute(50_000)
 
     // Both branches work independently — base is unchanged
     expect(withFee).toBeInstanceOf(TxBuilder)
@@ -152,24 +152,24 @@ describe("TxBuilder modifiers", () => {
     expect(withFee).not.toBe(withLimit)
   })
 
-  it("withJitoTip returns a new TxBuilder", async () => {
+  it("withTip returns a new TxBuilder", async () => {
     const client = connect("devnet")
     const signer = await generateKey()
 
     const original = client.buildTx({ feePayer: signer, instructions: [] })
-    const modified = original.withJitoTip(10_000n)
+    const modified = original.withTip(10_000n)
 
     expect(modified).not.toBe(original)
     expect(modified).toBeInstanceOf(TxBuilder)
   })
 
-  it("withAddressLookupTable returns a new TxBuilder", async () => {
+  it("withLookup returns a new TxBuilder", async () => {
     const { address } = await import("@solana/kit");
     const client = connect("devnet")
     const signer = await generateKey()
 
     const original = client.buildTx({ feePayer: signer, instructions: [] })
-    const modified = original.withAddressLookupTable(address("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"))
+    const modified = original.withLookup(address("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"))
 
     expect(modified).not.toBe(original)
     expect(modified).toBeInstanceOf(TxBuilder)
