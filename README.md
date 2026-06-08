@@ -179,14 +179,14 @@ const secret = await kp.toBase58()
 await kp.saveTo('./key.json')
 ```
 
-### PublicKey class
+### Address utilities
 
 ```typescript
-const pk = new PublicKey('HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH')
-pk.toBase58()          // full address
-pk.toBytes()           // Uint8Array(32)
-pk.equals(other)       // boolean
-PublicKey.isValid(str) // true/false
+import { addressToBytes, addressFromBytes, validateAddress } from 'inosuke'
+
+const bytes = addressToBytes('HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH') // Uint8Array(32)
+const addr = addressFromBytes(bytes)                                          // Address
+const safe = validateAddress(someInput)                                       // throws if invalid
 ```
 
 ### Runtime guards

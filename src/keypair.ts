@@ -5,25 +5,20 @@ import {
   getBase58Encoder,
   createSignerFromKeyPair,
 } from "@solana/kit"
-import type { KeyPairSigner } from "@solana/kit"
+import type { KeyPairSigner, Address } from "@solana/kit"
 import { KeypairLoadError, KeypairSaveError } from "./errors.js"
-import { PublicKey } from "./publickey.js"
 
 // ─── Keypair class ────────────────────────────────────────────────────────────
 
 export class Keypair {
   readonly signer: KeyPairSigner
-  readonly publicKey: PublicKey
+  readonly address: Address
   private _extractable: boolean
 
   private constructor(signer: KeyPairSigner, extractable: boolean) {
     this.signer = signer
-    this.publicKey = new PublicKey(signer.address)
+    this.address = signer.address
     this._extractable = extractable
-  }
-
-  get address(): string {
-    return this.signer.address
   }
 
   get secretKey(): Uint8Array | null {

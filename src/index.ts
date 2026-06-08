@@ -22,7 +22,7 @@ export type { TxHook, BuildTransactionOptions, PrepareOptions } from "./transact
 export { IdlProgram, getEncoderForIdlType, getDecoderForIdlType, getInstructionDiscriminator, getAccountDiscriminator } from "./idl.js"
 export type { IdlInstructionOptions } from "./idl.js"
 
-export { PublicKey, validateAddress } from "./publickey.js"
+export { addressToBytes, addressFromBytes, validateAddress } from "./publickey.js"
 export { Keypair } from "./keypair.js"
 export { asAddress, asSigner } from "./guards.js"
 export { debug, isDebugEnabled } from "./debug.js"
