@@ -275,8 +275,11 @@ await client.confirm(sig)                       // wait for confirmation
 ```typescript
 import {
   toSol, toLamports, toSolDisplay,
-  transferSol, mintToken, mintMore, transferToken, burnToken, getAta,
+  transferSol, SystemProgram,
+  mintToken, mintMore, transferToken, burnToken, getAta,
   toRawAmount, toUiAmount,
+  addMemo, insertReferenceKey,
+  program, WRITABLE, SIGNER, WRITABLE_SIGNER, READONLY,
   findPda, explorerUrl, truncate, validateAddress,
 } from 'inosuke'
 
@@ -287,8 +290,23 @@ toSolDisplay(1_500_000n)  // "0.0015"
 
 // SYSTEM
 const { instructions } = transferSol({ from: signer, to: recipient, amount: 1_000_000_000n })
+const createIx = SystemProgram.createAccount({ from: signer, newAccount: kp, lamports: rent, space: 165n, programId: Programs.SYSTEM })
 
-// TOKEN (functional style — no client needed)
+// MEMO — attach a note to any transaction
+const memoIx = addMemo("Payment for invoice #42")
+
+// REFERENCE — deduplicate transactions
+const refIx = insertReferenceKey(address("idempotency-key-42"))
+
+// PROGRAM FACTORY — non-Anchor programs
+const dex = program(address("DEX...programId"))
+const swapIx = dex.instruction(
+  mySwapData,
+  [
+    { address: user, role: WRITABLE_SIGNER },
+    { address: poolState, role: WRITABLE },
+  ]
+)
 const { instructions, mint } = await mintToken({ decimals: 9, authority: signer, rentFor: (s) => client.rentFor(s) })
 const { instructions } = await mintMore({ mint: mint.address, authority: signer, recipient, amount })
 const { instructions } = await transferToken({ mint, from: sender, to: recipient, amount, decimals: 9, payer: sender })
