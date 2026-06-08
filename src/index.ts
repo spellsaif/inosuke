@@ -52,7 +52,8 @@ export {
 export { transferSol, SystemProgram } from "./system.js"
 export type { TransferSolOptions, CreateAccountOptions } from "./system.js"
 
-export { addMemo, insertReferenceKey } from "./programs.js"
+export { addMemo, insertReferenceKey, program, WRITABLE, SIGNER, WRITABLE_SIGNER, READONLY } from "./programs.js"
+export type { ProgramAccount, ProgramClient } from "./programs.js"
 
 export {
   toSol,
