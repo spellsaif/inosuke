@@ -49,7 +49,7 @@ If you're building on Solana today, you're writing the Inosuke logic yourself â€
 ## Quick start
 
 ```bash
-npm install inosuke @solana/kit
+npm install inosuke
 ```
 
 ```typescript
