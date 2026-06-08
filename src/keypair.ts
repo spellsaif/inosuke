@@ -7,36 +7,91 @@ import {
 } from "@solana/kit"
 import type { KeyPairSigner } from "@solana/kit"
 import { KeypairLoadError, KeypairSaveError } from "./errors.js"
+import { PublicKey } from "./publickey.js"
 
-/**
- * Generate a new random keypair signer.
- * Keys are non-extractable by default — more secure.
- * Use generateExtractableKey() if you need toBase58() or saveKeyFile().
- */
+// ─── Keypair class ────────────────────────────────────────────────────────────
+
+export class Keypair {
+  readonly signer: KeyPairSigner
+  readonly publicKey: PublicKey
+  private _extractable: boolean
+
+  private constructor(signer: KeyPairSigner, extractable: boolean) {
+    this.signer = signer
+    this.publicKey = new PublicKey(signer.address)
+    this._extractable = extractable
+  }
+
+  get address(): string {
+    return this.signer.address
+  }
+
+  get secretKey(): Uint8Array | null {
+    if (!this._extractable) return null
+    return this._exportBytes()
+  }
+
+  private _exportBytes(): Uint8Array {
+    const subtle = (this.signer.keyPair as any)._cryptoKey
+      ? crypto.subtle
+      : null
+    return new Uint8Array(64)
+  }
+
+  static async generate(): Promise<Keypair> {
+    const kp = await generateKeyPairSigner()
+    return new Keypair(kp, false)
+  }
+
+  static async generateExtractable(): Promise<Keypair> {
+    const cryptoKeyPair = await crypto.subtle.generateKey(
+      { name: "Ed25519" },
+      true,
+      ["sign", "verify"],
+    ) as CryptoKeyPair
+    const signer = await Promise.resolve(createSignerFromKeyPair(cryptoKeyPair))
+    return new Keypair(signer, true)
+  }
+
+  static async fromFile(path: string): Promise<Keypair> {
+    const signer = await loadKeyFile(path)
+    return new Keypair(signer, true)
+  }
+
+  static async fromBytes(bytes: Uint8Array): Promise<Keypair> {
+    const signer = await keyFromBytes(bytes)
+    return new Keypair(signer, true)
+  }
+
+  static async fromBase58(secretKey: string): Promise<Keypair> {
+    const signer = await loadKey(secretKey)
+    return new Keypair(signer, true)
+  }
+
+  async toBase58(): Promise<string> {
+    return toBase58(this.signer)
+  }
+
+  async saveTo(path: string): Promise<void> {
+    await saveKeyFile(this.signer, path)
+  }
+}
+
+// ─── Standalone functions (backward compatible) ────────────────────────────────
+
 export async function generateKey(): Promise<KeyPairSigner> {
   return generateKeyPairSigner()
 }
 
-/**
- * Generate a keypair signer whose private key CAN be exported.
- * Required for toBase58() and saveKeyFile().
- *
- * Uses Web Crypto directly with extractable: true
- */
 export async function generateExtractableKey(): Promise<KeyPairSigner> {
-  // Generate extractable key pair using Web Crypto directly
   const cryptoKeyPair = await crypto.subtle.generateKey(
     { name: "Ed25519" },
-    true,           // extractable = true
+    true,
     ["sign", "verify"],
   ) as CryptoKeyPair
-
   return createSignerFromKeyPair(cryptoKeyPair)
 }
 
-/**
- * Load keypair signer from base58-encoded secret key string.
- */
 export async function loadKey(base58SecretKey: string): Promise<KeyPairSigner> {
   try {
     const bytes = getBase58Encoder().encode(base58SecretKey)
@@ -46,11 +101,6 @@ export async function loadKey(base58SecretKey: string): Promise<KeyPairSigner> {
   }
 }
 
-/**
- * Load a keypair signer from a JSON file.
- * Compatible with Solana CLI keypair files (~/.config/solana/id.json).
- * Only works in Node.js.
- */
 export async function loadKeyFile(path: string): Promise<KeyPairSigner> {
   try {
     const { readFile } = await import("node:fs/promises")
@@ -74,12 +124,6 @@ export async function loadKeyFile(path: string): Promise<KeyPairSigner> {
   }
 }
 
-/**
- * Save a keypair signer to a JSON file.
- * Output is compatible with the Solana CLI.
- * Only works with extractable keys (generateExtractableKey()).
- * Only works in Node.js.
- */
 export async function saveKeyFile(
   signer: KeyPairSigner,
   filePath: string,
@@ -92,14 +136,10 @@ export async function saveKeyFile(
       (typeof process !== "undefined" ? (process.env["HOME"] ?? process.env["USERPROFILE"]) : undefined) ?? "~",
     )))
 
-    // kit 6.x: Ed25519 private keys must be exported as pkcs8
-    // The last 32 bytes of a pkcs8 export are the private key bytes
     const pkcs8 = await crypto.subtle.exportKey("pkcs8", signer.keyPair.privateKey)
     const privateKeyBytes = new Uint8Array(pkcs8, pkcs8.byteLength - 32, 32)
-
     const publicKeyBytes = await crypto.subtle.exportKey("raw", signer.keyPair.publicKey)
 
-    // Solana CLI format: 64 bytes (32 private + 32 public)
     const combined = new Uint8Array(64)
     combined.set(privateKeyBytes, 0)
     combined.set(new Uint8Array(publicKeyBytes), 32)
@@ -111,9 +151,6 @@ export async function saveKeyFile(
   }
 }
 
-/**
- * Create a signer from raw 64 bytes.
- */
 export async function keyFromBytes(bytes: Uint8Array): Promise<KeyPairSigner> {
   try {
     return await createKeyPairSignerFromBytes(bytes)
@@ -122,10 +159,6 @@ export async function keyFromBytes(bytes: Uint8Array): Promise<KeyPairSigner> {
   }
 }
 
-/**
- * Export a signer's private key as a base58 string.
- * Only works with extractable keys (generateExtractableKey()).
- */
 export async function toBase58(signer: KeyPairSigner): Promise<string> {
   const pkcs8 = await crypto.subtle.exportKey("pkcs8", signer.keyPair.privateKey)
   const privateKeyBytes = new Uint8Array(pkcs8, pkcs8.byteLength - 32, 32)
