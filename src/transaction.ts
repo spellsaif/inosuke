@@ -23,217 +23,207 @@ import {
   getSetComputeUnitPriceInstruction,
 } from "@solana-program/compute-budget"
 import { getTransferSolInstruction } from "@solana-program/system"
+import { fetchAddressLookupTable } from "@solana-program/address-lookup-table"
+import { compressTransactionMessageUsingAddressLookupTables } from "@solana/transaction-messages"
 import { SimulationError, BlockhashExpiredError } from "./errors.js"
 import { parseSimulationLogs, sleep } from "./utils.js"
+import { debug } from "./debug.js"
 import type { LatestBlockhash, SendOptions, SendResult, ClusterInput } from "./types.js"
 
-//  Constants 
-
-// Add 10% on top of simulated CU usage as a safety buffer.
-// Why 10%? Programs can use slightly more CUs on mainnet than
-// on simulation due to different account states. 10% covers this
-// without wasting too much budget.
 const COMPUTE_UNIT_BUFFER = 1.1
-
-// Fallback limit when simulation is skipped.
-// 200_000 is a reasonable default for simple transactions.
-// Complex transactions (multiple instructions, large programs) need more.
 const DEFAULT_COMPUTE_UNIT_LIMIT = 200_000
 
-// State 
+// ─── Hook types ───────────────────────────────────────────────────────────────
 
-// This is the internal state of a TxBuilder.
-// We keep it separate from the class so it's clear what data the builder holds.
+export type TxHook =
+  | "simulate" | "sign" | "send" | "confirm" | "retry" | "error"
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type HookFn = (data: any) => void | Promise<void> | boolean | Promise<boolean>
+
+// ─── Fee strategy types ───────────────────────────────────────────────────────
+
+type FeeStrategy =
+  | "auto"
+  | "low"
+  | "medium"
+  | "high"
+  | "veryHigh"
+
 interface TxBuilderState {
   feePayer: TransactionSigner
-  instructions: Instruction[]                    
-  computeUnitLimit: number | undefined           
-  computeUnitPrice: bigint | undefined           
-  latestBlockhash: LatestBlockhash | undefined   
+  instructions: Instruction[]
+  computeUnitLimit: number | undefined
+  computeUnitPrice: bigint | undefined
+  latestBlockhash: LatestBlockhash | undefined
   lookupTables: Address[]
   jitoTip: bigint | undefined
   jitoEngine: string | undefined
-  dynamicPriorityFeeLevel?: "low" | "medium" | "high" | "veryHigh" | undefined
+  feeStrategy: FeeStrategy | undefined
   cluster: ClusterInput
   rpc: RpcConnection
   rpcSubscriptions: RpcSubscriptionsConnection
+  hooks: Map<TxHook, HookFn[]>
 }
 
 type RpcConnection = ReturnType<typeof import("@solana/kit").createSolanaRpc>
 type RpcSubscriptionsConnection = ReturnType<typeof import("@solana/kit").createSolanaRpcSubscriptions>
 
-// TxBuilder
+// ─── TxBuilder ────────────────────────────────────────────────────────────────
 
-/**
- * A fluent transaction builder.
- * Created by client.buildTx() — not constructed directly.
- *
- * Every modifier method returns a NEW TxBuilder with the updated state.
- * The original is never mutated.
- *
- * Why immutable? So you can branch:
- *   const base = client.buildTx({ feePayer, instructions })
- *   const withFee = base.withPriorityFee(1000n)
- *   const withLimit = base.withComputeLimit(50_000)
- *   // base is unchanged — both branches work independently
- */
 export class TxBuilder {
-  // Private — callers should not access state directly
   private readonly state: TxBuilderState
 
   constructor(state: TxBuilderState) {
     this.state = state
   }
 
-  // Modifiers
+  // ── Fee modifiers ───────────────────────────────────────────────────────────
 
   /**
-   * Override the compute unit limit.
-   * By default lamport simulates and sets this automatically.
-   * Use this when you know exactly how many CUs your transaction needs.
+   * Set priority fee. One method, three modes:
+   *   .withFee(1000n)         — explicit microLamports
+   *   .withFee("high")        — dynamic percentile
+   *   .withFee("auto")        — let Inosuke decide (default)
    *
-   * @example
-   * client.buildTx({...}).withComputeLimit(100_000).send()
+   * Also accepts a config object:
+   *   .withFee({ strategy: "percentile", level: "high", floor: 500n })
    */
-  withComputeLimit(units: number): TxBuilder {
-    // Return a new TxBuilder — never mutate the existing one
+  withFee(
+    fee: bigint | FeeStrategy | { strategy: "explicit"; value: bigint } | { strategy: "percentile"; level: FeeStrategy extends "auto" ? never : FeeStrategy & string; floor?: bigint }
+  ): TxBuilder {
+    if (typeof fee === "bigint") {
+      return new TxBuilder({ ...this.state, computeUnitPrice: fee, feeStrategy: undefined })
+    }
+    if (typeof fee === "string") {
+      if (fee === "auto") {
+        return new TxBuilder({ ...this.state, feeStrategy: "auto" })
+      }
+      return new TxBuilder({ ...this.state, feeStrategy: fee as FeeStrategy, computeUnitPrice: undefined })
+    }
+    if (fee.strategy === "explicit") {
+      return new TxBuilder({ ...this.state, computeUnitPrice: fee.value, feeStrategy: undefined })
+    }
+    return new TxBuilder({ ...this.state, feeStrategy: fee.level as FeeStrategy, computeUnitPrice: undefined })
+  }
+
+  // ── Compute modifier ────────────────────────────────────────────────────────
+
+  withCompute(units: number): TxBuilder {
     return new TxBuilder({ ...this.state, computeUnitLimit: units })
   }
 
-  /**
-   * Set a priority fee in microLamports per compute unit.
-   *
-   * What is a priority fee? Validators process transactions in order
-   * of fee per CU. During congestion, paying more = landing faster.
-   *
-   * @example
-   * client.buildTx({...}).withPriorityFee(1000n).send()
-   */
-  withPriorityFee(microLamports: bigint): TxBuilder {
-    return new TxBuilder({ ...this.state, computeUnitPrice: microLamports })
-  }
+  // ── Instructions ────────────────────────────────────────────────────────────
 
-  /**
-   * Set a dynamic, congestion-aware priority fee based on the localized fee market.
-   *
-   * What is a dynamic priority fee? It queries the RPC specifically for fees
-   * on the write/read accounts involved in this transaction, then applies
-   * a percentile fee based on the requested level:
-   * - "low": 25th percentile
-   * - "medium": 50th percentile (median)
-   * - "high": 75th percentile
-   * - "veryHigh": 95th percentile
-   *
-   * @example
-   * client.buildTx({...}).withDynamicPriorityFee("high").send()
-   */
-  withDynamicPriorityFee(level: "low" | "medium" | "high" | "veryHigh"): TxBuilder {
-    return new TxBuilder({ ...this.state, dynamicPriorityFeeLevel: level })
-  }
-
-  /**
-   * Append additional instructions to the transaction.
-   *
-   * @example
-   * client.buildTx({ feePayer, instructions: [mainIx] })
-   *   .withInstructions([memoIx, referenceIx])
-   *   .send()
-   */
-   withInstructions(instructions: Instruction[]): TxBuilder {
+  withInstructions(instructions: Instruction[]): TxBuilder {
     return new TxBuilder({
       ...this.state,
       instructions: [...this.state.instructions, ...instructions],
     })
   }
 
-  /**
-   * Provide a pre-fetched blockhash.
-   * Skips the auto-fetch inside .send().
-   *
-   * Useful when you're sending multiple transactions and want them
-   * all to use the same blockhash — saves RPC calls.
-   *
-   * @example
-   * const bh = await client.recentBlockhash()
-   * await Promise.all([
-   *   client.buildTx({...}).withBlockhash(bh).send(),
-   *   client.buildTx({...}).withBlockhash(bh).send(),
-   * ])
-   */
+  // ── Fee payer ───────────────────────────────────────────────────────────────
+
+  signedBy(signer: TransactionSigner): TxBuilder {
+    return new TxBuilder({ ...this.state, feePayer: signer })
+  }
+
+  // ── Blockhash ───────────────────────────────────────────────────────────────
+
   withBlockhash(latestBlockhash: LatestBlockhash): TxBuilder {
     return new TxBuilder({ ...this.state, latestBlockhash })
   }
 
-  /**
-   * Add an Address Lookup Table (ALT) to compress the transaction payload.
-   * This is required for complex transactions that exceed the 1232-byte limit.
-   */
-  withAddressLookupTable(address: Address): TxBuilder {
+  // ── Lookup tables ────────────────────────────────────────────────────────────
+
+  withLookup(address: Address): TxBuilder {
     return new TxBuilder({
       ...this.state,
       lookupTables: [...this.state.lookupTables, address],
     })
   }
 
-  /**
-   * Add a Jito Tip to the transaction to bypass network congestion and protect against MEV.
-   * If this is set, the transaction is sent directly to the Jito Block Engine instead of public RPC.
-   * 
-   * @example
-   * client.buildTx({...}).withJitoTip(10_000n).send()
-   */
-  withJitoTip(microLamports: bigint): TxBuilder {
+  // ── Jito tip ─────────────────────────────────────────────────────────────────
+
+  withTip(microLamports: bigint): TxBuilder {
     return new TxBuilder({ ...this.state, jitoTip: microLamports })
   }
 
-  /**
-   * Override the Jito Block Engine URL (e.g. for regional block engines).
-   * Default is determined by client.cluster (mainnet vs devnet).
-   */
   withJitoEngine(url: string): TxBuilder {
     return new TxBuilder({ ...this.state, jitoEngine: url })
   }
 
-  // Simulate
+  // ── Lifecycle hooks ─────────────────────────────────────────────────────────
 
-  /**
-   * Simulate the transaction and return compute unit usage.
-   *
-   * This runs the transaction against the current chain state
-   * WITHOUT actually submitting it. No fees paid. No state changes.
-   *
-   * Called automatically by .send() unless you call .withComputeLimit().
-   *
-   * Why simulate before sending?
-   * 1. Catch errors before paying fees
-   * 2. Measure actual CU usage to set an accurate limit
-   * 3. Avoid "exceeded compute budget" failures on-chain
-   */
+  on(
+    event: "simulate",
+    fn: (data: { unitsConsumed: number; logs: string[] }) => void | Promise<void>,
+  ): TxBuilder
+  on(
+    event: "sign",
+    fn: (data: { message: unknown }) => boolean | Promise<boolean>,
+  ): TxBuilder
+  on(
+    event: "send",
+    fn: (data: { signature: string }) => void | Promise<void>,
+  ): TxBuilder
+  on(
+    event: "confirm",
+    fn: (data: { signature: string; slot: bigint }) => void | Promise<void>,
+  ): TxBuilder
+  on(
+    event: "retry",
+    fn: (data: { attempt: number; reason: string }) => void | Promise<void>,
+  ): TxBuilder
+  on(
+    event: "error",
+    fn: (data: { error: Error }) => void | Promise<void>,
+  ): TxBuilder
+  on(event: TxHook | string, fn: HookFn): TxBuilder {
+    const hooks = new Map(this.state.hooks)
+    const existing = hooks.get(event as TxHook) ?? []
+    hooks.set(event as TxHook, [...existing, fn])
+    return new TxBuilder({ ...this.state, hooks })
+  }
+
+  // ── Estimate ─────────────────────────────────────────────────────────────────
+
+  async estimate(): Promise<{
+    computeUnits: number
+    computeUnitPrice: bigint | null
+    estimatedFee: bigint
+  }> {
+    const sim = await this.simulate()
+    let price = this.state.computeUnitPrice ?? null
+    if (price === null && this.state.feeStrategy) {
+      price = await this._resolveDynamicFee()
+    }
+    const cu = Math.ceil(sim.unitsConsumed * COMPUTE_UNIT_BUFFER)
+    const estFee = price ? BigInt(cu) * price : 0n
+    return {
+      computeUnits: cu,
+      computeUnitPrice: price,
+      estimatedFee: estFee,
+    }
+  }
+
+  // ── Simulate ─────────────────────────────────────────────────────────────────
+
   async simulate(): Promise<{ unitsConsumed: number; logs: string[] }> {
-    const { rpc, feePayer, instructions } = this.state
+    const { rpc, instructions } = this.state
 
-    // We need a blockhash for the simulation message
-    // replaceRecentBlockhash: true below means the RPC will substitute
-    // a fresh one anyway — we just need something valid to build with
-    const { value: blockhash } = await rpc
-      .getLatestBlockhash({ commitment: "confirmed" })
-      .send()
+    const blockhash = this.state.latestBlockhash
+      ? this.state.latestBlockhash
+      : (await rpc.getLatestBlockhash({ commitment: "confirmed" }).send()).value
 
-    // Build the transaction message for simulation
-    // We use DEFAULT_COMPUTE_UNIT_LIMIT here — if the real limit
-    // were too low, simulation would fail and we'd get a misleading error
     const message = await this._buildMessage(
       blockhash,
       DEFAULT_COMPUTE_UNIT_LIMIT,
     )
 
-    // Compile and encode — same process as real sending
     const compiled = compileTransaction(message)
     const encoded = getBase64EncodedWireTransaction(compiled)
 
-    // simulateTransaction runs the tx against the validator's current state
-    // replaceRecentBlockhash: true — use the validator's current blockhash
-    // so we don't need an exact recent one for simulation
     const result = await rpc
       .simulateTransaction(
         encoded as Parameters<typeof rpc.simulateTransaction>[0],
@@ -248,8 +238,6 @@ export class TxBuilder {
     const { value } = result
     const logs = (value.logs ?? []) as string[]
 
-    // If simulation shows an error, the transaction WILL fail on-chain
-    // Throw now before the user pays fees on a doomed transaction
     if (value.err !== null) {
       const reason =
         parseSimulationLogs(logs) ??
@@ -257,50 +245,45 @@ export class TxBuilder {
       throw new SimulationError(reason, logs)
     }
 
-    return {
-      unitsConsumed: Number(value.unitsConsumed ?? DEFAULT_COMPUTE_UNIT_LIMIT),
-      logs,
+    const unitsConsumed = Number(value.unitsConsumed ?? DEFAULT_COMPUTE_UNIT_LIMIT)
+
+    debug(() => `simulate: ${instructions.length} ix, ${unitsConsumed} CU consumed`, "debug")
+
+    for (const fn of this.state.hooks.get("simulate") ?? []) {
+      await (fn as (data: { unitsConsumed: number; logs: string[] }) => void)({ unitsConsumed, logs })
     }
+
+    return { unitsConsumed, logs }
   }
 
-  // Send
+  // ── Send ─────────────────────────────────────────────────────────────────────
 
-  /**
-   * Sign, send, and confirm the transaction.
-   *
-   * Automatically:
-   * - Fetches a recent blockhash (unless withBlockhash() was called)
-   * - Simulates to measure CUs (unless withComputeLimit() was called)
-   * - Retries on blockhash expiry with exponential backoff
-   * - Waits for confirmation at the specified commitment level
-   *
-   * @example
-   * const result = await client.buildTx({...}).send()
-   * console.log(result.signature)
-   * console.log(result.retries) // 0 if it landed first try
-   */
   async send(options: SendOptions = {}): Promise<SendResult> {
     const {
-      maxRetries    = 3,
-      commitment    = "confirmed",
+      maxRetries = 3,
+      commitment = "confirmed",
       skipPreflight = false,
     } = options
 
     const { rpc, rpcSubscriptions } = this.state
 
-    // Create the sendAndConfirm function once — reused across retries
-    // This is the new API replacing rpc.confirmTransaction()
     const sendAndConfirmTransaction = sendAndConfirmTransactionFactory({
-  rpc: rpc as Parameters<typeof sendAndConfirmTransactionFactory>[0]["rpc"],
-  rpcSubscriptions: rpcSubscriptions as Parameters<typeof sendAndConfirmTransactionFactory>[0]["rpcSubscriptions"],
-})
+      rpc: rpc as Parameters<typeof sendAndConfirmTransactionFactory>[0]["rpc"],
+      rpcSubscriptions: rpcSubscriptions as Parameters<typeof sendAndConfirmTransactionFactory>[0]["rpcSubscriptions"],
+    })
 
     let retries = 0
 
     while (retries <= maxRetries) {
-      const { value: latestBlockhash } = await rpc
-        .getLatestBlockhash({ commitment: "confirmed" })
-        .send()
+      let latestBlockhash: LatestBlockhash
+      if (this.state.latestBlockhash) {
+        latestBlockhash = this.state.latestBlockhash
+      } else {
+        const { value } = await rpc
+          .getLatestBlockhash({ commitment: "confirmed" })
+          .send()
+        latestBlockhash = value
+      }
 
       let computeUnitLimit = this.state.computeUnitLimit
 
@@ -311,56 +294,45 @@ export class TxBuilder {
 
       let resolvedPriorityFee = this.state.computeUnitPrice
 
-      if (this.state.dynamicPriorityFeeLevel !== undefined && resolvedPriorityFee === undefined) {
-        try {
-          const accounts = this.state.instructions.flatMap(ix => ix.accounts?.map(acc => acc.address) || [])
-          const uniqueAccounts = [...new Set(accounts)]
-          const fees = await rpc.getRecentPrioritizationFees(uniqueAccounts).send()
-          
-          if (fees && fees.length > 0) {
-            const prices = fees
-              .map(f => BigInt(f.prioritizationFee))
-              .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
-            const percentile = 
-              this.state.dynamicPriorityFeeLevel === "low" ? 0.25 :
-              this.state.dynamicPriorityFeeLevel === "medium" ? 0.50 :
-              this.state.dynamicPriorityFeeLevel === "high" ? 0.75 :
-              0.95
-            const index = Math.min(prices.length - 1, Math.floor(prices.length * percentile))
-            resolvedPriorityFee = prices[index]!
-          }
-        } catch (e) {
-          // Fallback to floor if query fails
-        }
-        
-        // Apply floor
-        if (resolvedPriorityFee === undefined || resolvedPriorityFee < 1000n) {
-          resolvedPriorityFee = 1000n
-        }
+      if (resolvedPriorityFee === undefined && this.state.feeStrategy !== undefined && this.state.feeStrategy !== "auto") {
+        resolvedPriorityFee = await this._resolveDynamicFee()
+        debug(() => `dynamic fee resolved: ${resolvedPriorityFee} microLamports (${this.state.feeStrategy})`, "debug")
       }
 
       const message = await this._buildMessage(latestBlockhash, computeUnitLimit, resolvedPriorityFee)
-      const signed  = await signTransactionMessageWithSigners(message)
 
+      for (const fn of this.state.hooks.get("sign") ?? []) {
+        const shouldContinue = await (fn as (data: { message: unknown }) => boolean | Promise<boolean>)({ message })
+        if (shouldContinue === false) {
+          throw new Error("Transaction signing was aborted by a sign hook")
+        }
+      }
+
+      const signed = await signTransactionMessageWithSigners(message)
       assertIsTransactionWithBlockhashLifetime(signed)
-
       const signature = getSignatureFromTransaction(signed)
+
+      debug(() => `sending: ${signature.slice(0, 12)}...`, "info")
+
+      for (const fn of this.state.hooks.get("send") ?? []) {
+        await (fn as (data: { signature: string }) => void)({ signature })
+      }
 
       try {
         if (this.state.jitoTip !== undefined) {
-          let jitoUrl = this.state.jitoEngine;
+          let jitoUrl = this.state.jitoEngine
           if (!jitoUrl) {
-            const cluster = this.state.cluster;
+            const cluster = this.state.cluster
             if (cluster === "mainnet") {
-              jitoUrl = "https://mainnet.block-engine.jito.wtf/api/v1/transactions";
+              jitoUrl = "https://mainnet.block-engine.jito.wtf/api/v1/transactions"
             } else if (cluster === "devnet") {
-              jitoUrl = "https://dallas.mainnet.block-engine.jito.wtf/api/v1/transactions";
+              jitoUrl = "https://dallas.mainnet.block-engine.jito.wtf/api/v1/transactions"
             } else {
-              throw new Error(`Jito is not supported on cluster: ${cluster}. Jito is only supported on mainnet and devnet.`);
+              throw new Error(`Jito is not supported on cluster: ${cluster}.`)
             }
           }
 
-          const encodedTx = getBase64EncodedWireTransaction(signed);
+          const encodedTx = getBase64EncodedWireTransaction(signed)
           const response = await fetch(jitoUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -370,46 +342,48 @@ export class TxBuilder {
               method: "sendTransaction",
               params: [encodedTx, { encoding: "base64" }]
             })
-          });
-          
+          })
+
           if (!response.ok) {
-            throw new Error(`Jito Bundle Error: ${await response.text()}`);
+            throw new Error(`Jito Bundle Error: ${await response.text()}`)
           }
-          
-          // Poll for confirmation
-          let confirmed = false;
-          const targetStatuses: string[] = [commitment];
+
+          let confirmed = false
+          const targetStatuses: string[] = [commitment]
           if (commitment === "processed") {
-            targetStatuses.push("confirmed", "finalized");
+            targetStatuses.push("confirmed", "finalized")
           } else if (commitment === "confirmed") {
-            targetStatuses.push("finalized");
+            targetStatuses.push("finalized")
           }
 
           for (let i = 0; i < 30; i++) {
-             await sleep(1000);
-             const sigStatus = await rpc.getSignatureStatuses([signature]).send();
-             const status = sigStatus.value[0];
-             if (status) {
-               if (status.err) throw new Error(`Transaction failed: ${JSON.stringify(status.err)}`);
-               if (status.confirmationStatus && targetStatuses.includes(status.confirmationStatus)) {
-                 confirmed = true;
-                 break;
-               }
-             }
+            await sleep(Math.min(1000 + i * 200, 5000))
+            const sigStatus = await rpc.getSignatureStatuses([signature]).send()
+            const status = sigStatus.value[0]
+            if (status) {
+              if (status.err) throw new Error(`Transaction failed: ${JSON.stringify(status.err)}`)
+              if (status.confirmationStatus && targetStatuses.includes(status.confirmationStatus)) {
+                confirmed = true
+                break
+              }
+            }
           }
-          if (!confirmed) throw new Error("Jito transaction timeout");
+          if (!confirmed) throw new Error("Jito transaction timeout")
         } else {
-          // sendAndConfirmTransaction handles encoding, sending, and confirming
-          // It uses WebSocket subscriptions internally for efficient confirmation
           await sendAndConfirmTransaction(signed, { commitment })
         }
 
-        // Get the slot from the RPC after confirmation
         const sigStatus = await rpc
           .getSignatureStatuses([signature])
           .send()
 
         const slot = sigStatus.value[0]?.slot ?? 0n
+
+        debug(() => `confirmed: ${signature.slice(0, 12)}... slot ${slot}`, "info")
+
+        for (const fn of this.state.hooks.get("confirm") ?? []) {
+          await (fn as (data: { signature: string; slot: bigint }) => void)({ signature, slot })
+        }
 
         return {
           signature,
@@ -420,17 +394,45 @@ export class TxBuilder {
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e)
 
-        if (
+        const isExpired =
           msg.includes("BlockhashNotFound") ||
           msg.includes("block height exceeded") ||
           msg.includes("Blockhash not found")
-        ) {
-          if (retries < maxRetries) {
-            retries++
-            await sleep(500 * retries)
-            continue
+
+        const isTransient =
+          isExpired ||
+          msg.includes("429") ||
+          msg.includes("503") ||
+          msg.includes("timeout") ||
+          msg.includes("ECONNRESET") ||
+          msg.includes("ECONNREFUSED") ||
+          msg.includes("ETIMEDOUT") ||
+          msg.includes("fetch failed")
+
+        if (isTransient && retries < maxRetries) {
+          retries++
+          await sleep(500 * retries)
+
+          debug(() => `retry ${retries}/${maxRetries}: ${isExpired ? "blockhash expired" : msg}`, "warn")
+
+          if (isExpired) {
+            for (const fn of this.state.hooks.get("retry") ?? []) {
+              await (fn as (data: { attempt: number; reason: string }) => void)({ attempt: retries, reason: "blockhash expired" })
+            }
+          } else {
+            for (const fn of this.state.hooks.get("retry") ?? []) {
+              await (fn as (data: { attempt: number; reason: string }) => void)({ attempt: retries, reason: msg })
+            }
           }
+          continue
+        }
+
+        if (isExpired) {
           throw new BlockhashExpiredError({ cause: e })
+        }
+
+        for (const fn of this.state.hooks.get("error") ?? []) {
+          await (fn as (data: { error: Error }) => void)({ error: e instanceof Error ? e : new Error(msg) })
         }
 
         throw e
@@ -440,19 +442,35 @@ export class TxBuilder {
     throw new BlockhashExpiredError()
   }
 
-  /**
-   * Build the transaction message using kit's pipe() pattern.
-   *
-   * pipe() takes a value and passes it through a series of functions.
-   * Each function receives the output of the previous one.
-   * Nothing is mutated — each step returns a new message object.
-   *
-   * Why pipe()? It makes the transaction construction readable
-   * as a sequence of steps, and it's type-safe — TypeScript tracks
-   * what properties the message has after each step.
-   *
-   * @internal
-   */
+  // ── Internal: resolve dynamic fee ───────────────────────────────────────────
+
+  private async _resolveDynamicFee(): Promise<bigint> {
+    const { rpc, instructions, feeStrategy } = this.state
+    try {
+      const accounts = instructions.flatMap(ix => ix.accounts?.map(acc => acc.address) || [])
+      const uniqueAccounts = [...new Set(accounts)]
+      const fees = await (rpc as any).getRecentPrioritizationFees(uniqueAccounts).send()
+
+      if (fees && fees.length > 0) {
+        const prices = fees
+          .map((f: any) => BigInt(f.prioritizationFee))
+          .sort((a: bigint, b: bigint) => (a < b ? -1 : a > b ? 1 : 0))
+        const percentile =
+          feeStrategy === "low" ? 0.25 :
+          feeStrategy === "medium" ? 0.50 :
+          feeStrategy === "high" ? 0.75 : 0.95
+        const index = Math.min(prices.length - 1, Math.floor(prices.length * percentile))
+        const fee = prices[index] as bigint
+        return fee < 1000n ? 1000n : fee
+      }
+    } catch {
+      // Fall through to floor
+    }
+    return 1000n
+  }
+
+  // ── Internal: build message ─────────────────────────────────────────────────
+
   private async _buildMessage(
     blockhash: { blockhash: string; lastValidBlockHeight: bigint },
     computeUnitLimit: number | undefined,
@@ -490,18 +508,17 @@ export class TxBuilder {
       (tx) => appendTransactionMessageInstructions(instructions, tx),
       (tx) => {
         if (this.state.jitoTip !== undefined) {
-          let tipAccounts: Address[];
-          const cluster = this.state.cluster;
-          
+          let tipAccounts: Address[]
+          const cluster = this.state.cluster
+
           if (cluster === "devnet") {
             tipAccounts = [
               "2MCne6aF8UrwUeaZ1XSxt2ece9As5p1QZ8795G1Yt4rX",
               "3357rnCR5U4k18Ek2s5GmeeaQifXBnu4CjPcjzNq6pdx",
               "34M253jB7exA55K2g5jFfFphG16V39fDCL6Hwth2G1nZ",
               "35kZdfP5D4r6G8mG6P44jQ3s4n7G16fDCL6Hwth2G1na"
-            ] as Address[];
+            ] as Address[]
           } else {
-            // Default to mainnet
             tipAccounts = [
               "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
               "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
@@ -511,28 +528,24 @@ export class TxBuilder {
               "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwTc53",
               "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeMgRwbb5Qz",
               "FKrPkTwrBGPUUe6bQ4r7UqD9E8N8VwP6E2qL6Fk121y",
-            ] as Address[];
+            ] as Address[]
           }
 
-          const randomTipAccount = tipAccounts[Math.floor(Math.random() * tipAccounts.length)];
+          const randomTipAccount = tipAccounts[Math.floor(Math.random() * tipAccounts.length)]
           const tipIx = getTransferSolInstruction({
             source: feePayer,
             destination: randomTipAccount!,
             amount: this.state.jitoTip,
-          });
-          return appendTransactionMessageInstruction(tipIx, tx);
+          })
+          return appendTransactionMessageInstruction(tipIx, tx)
         }
-        return tx;
+        return tx
       }
     )
 
     if (lookupTables.length > 0) {
-      const { fetchAddressLookupTable } = await import("@solana-program/address-lookup-table")
-      const { compressTransactionMessageUsingAddressLookupTables } = await import("@solana/transaction-messages")
-      
       const addressesByLookupTableAddress: Record<string, Address[]> = {}
-      
-      // Fetch lookup tables in parallel to minimize network latency
+
       await Promise.all(
         lookupTables.map(async (address) => {
           const { data: { addresses } } = await fetchAddressLookupTable(rpc as any, address)
@@ -549,3 +562,111 @@ export class TxBuilder {
     return message
   }
 }
+
+// ─── Standalone: build a transaction (builder-free) ───────────────────────────
+
+export interface BuildTransactionOptions {
+  feePayer: TransactionSigner
+  instructions: Instruction[]
+  latestBlockhash?: LatestBlockhash
+  computeUnitLimit?: number
+  computeUnitPrice?: bigint
+  version?: 0 | "legacy"
+}
+
+/**
+ * Build a transaction message without the fluent builder.
+ * Returns raw kit types — you control signing, sending, everything.
+ *
+ * Unlike TxBuilder, this does NOT simulate or resolve fees.
+ * Use prepareTransaction() for the auto-simulate step.
+ *
+ * @example
+ * const tx = buildTransaction({ feePayer: kp.signer, instructions: [ix] })
+ * const signed = await signTransactionMessageWithSigners(tx)
+ */
+export function buildTransaction(options: BuildTransactionOptions) {
+  const { feePayer, instructions, latestBlockhash, computeUnitLimit, computeUnitPrice, version = 0 } = options
+
+  return pipe(
+    createTransactionMessage({ version }),
+    (tx) => setTransactionMessageFeePayerSigner(feePayer, tx),
+    (tx) => latestBlockhash
+      ? setTransactionMessageLifetimeUsingBlockhash(latestBlockhash as TransactionMessageWithBlockhashLifetime["lifetimeConstraint"], tx)
+      : tx,
+    (tx) => computeUnitLimit !== undefined
+      ? appendTransactionMessageInstruction(getSetComputeUnitLimitInstruction({ units: computeUnitLimit }), tx)
+      : tx,
+    (tx) => computeUnitPrice !== undefined
+      ? appendTransactionMessageInstruction(getSetComputeUnitPriceInstruction({ microLamports: computeUnitPrice }), tx)
+      : tx,
+    (tx) => appendTransactionMessageInstructions(instructions, tx),
+  )
+}
+
+// ─── Standalone: prepare a transaction for sending ────────────────────────────
+
+export interface PrepareOptions {
+  rpc: RpcConnection
+  computeUnitLimitMultiplier?: number
+  computeUnitLimitReset?: boolean
+  blockhashReset?: boolean
+}
+
+/**
+ * Prepare a raw TransactionMessage for sending:
+ * - Simulates to measure CU usage (if no compute limit set)
+ * - Fetches fresh blockhash (if none set)
+ * - Applies buffer on measured CUs
+ *
+ * Works on ANY TransactionMessage, not just ones from the builder.
+ * Use this when you built the tx yourself with kit primitives.
+ *
+ * @example
+ * const prepared = await prepareTransaction(rawTx, { rpc: client.rpc })
+ */
+export async function prepareTransaction(
+  tx: ReturnType<typeof createTransactionMessage>,
+  options: PrepareOptions,
+) {
+  const { rpc, computeUnitLimitMultiplier = 1.1, computeUnitLimitReset = false, blockhashReset = true } = options
+
+  let current: any = tx
+
+  // Ensure blockhash
+  if (blockhashReset || !("lifetimeConstraint" in current)) {
+    debug("preparing: fetching fresh blockhash", "debug")
+    const { value: bh } = await rpc.getLatestBlockhash({ commitment: "confirmed" }).send()
+    if (!("lifetimeConstraint" in current)) {
+      current = setTransactionMessageLifetimeUsingBlockhash(bh, current)
+    } else {
+      current = Object.freeze({ ...current, lifetimeConstraint: bh })
+    }
+  }
+
+  // Ensure compute limit via simulation
+  const existingLimit = current.instructions?.some?.((ix: Instruction) => ix.programAddress === "ComputeBudget111111111111111111111111111111") ?? false
+
+  if (!existingLimit || computeUnitLimitReset) {
+    debug("preparing: simulating for CU estimation", "debug")
+    const simMsg = compileTransaction(current)
+    const simEncoded = getBase64EncodedWireTransaction(simMsg)
+    const simResult = await (rpc as any).simulateTransaction(simEncoded, {
+      encoding: "base64",
+      replaceRecentBlockhash: true,
+      commitment: "confirmed",
+    }).send()
+
+    const units = Number(simResult.value?.unitsConsumed ?? DEFAULT_COMPUTE_UNIT_LIMIT)
+    const withBuffer = Math.ceil(units * computeUnitLimitMultiplier)
+    debug(() => `prepared: ${units} CU measured → ${withBuffer} with ${computeUnitLimitMultiplier}x buffer`, "debug")
+
+    current = appendTransactionMessageInstruction(
+      getSetComputeUnitLimitInstruction({ units: withBuffer }),
+      current,
+    )
+  }
+
+  return current
+}
+
