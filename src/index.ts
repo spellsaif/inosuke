@@ -49,8 +49,10 @@ export {
   TOKEN_2022_PROGRAM_ADDRESS,
 } from "./token.js"
 
-export { transferSol } from "./system.js"
-export type { TransferSolOptions } from "./system.js"
+export { transferSol, SystemProgram } from "./system.js"
+export type { TransferSolOptions, CreateAccountOptions } from "./system.js"
+
+export { addMemo, insertReferenceKey } from "./programs.js"
 
 export {
   toSol,
